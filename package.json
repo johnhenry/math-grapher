@@ -38,7 +38,8 @@
     "url": "https://github.com/johnhenry/math-grapher/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "license": "MIT",
   "sideEffects": false,
