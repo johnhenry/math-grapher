@@ -382,3 +382,79 @@ test("serialization: interleaved calls against one session apply in submission o
   await Promise.all(writes);
   assert.deepEqual(await table.getCell(sessionId, "x"), { value: 5 });
 });
+
+// ---- eval-budget guard armed on the redefine path (audit finding #1) ------
+
+/** A synthetic catalog for exercising the deadline guard against a cascading
+ * recompute: `slow` deliberately busy-loops well past any reasonable eval
+ * budget, `const_val`/`join` are cheap ops chained via `$cell` refs so a
+ * redefine's compute can cascade into more than one nested recompute. */
+const CASCADE_CATALOG: OpCatalog = {
+  slow: {
+    description: "test-only: busy-loops for args.ms milliseconds, then returns a marker",
+    fn: (args) => {
+      const ms = args.ms as number;
+      const start = Date.now();
+      while (Date.now() - start < ms) {
+        /* deliberate synchronous busy-wait -- simulates an expensive op */
+      }
+      return "slow-done";
+    },
+  },
+  const_val: { description: "test-only: returns args.v unchanged", fn: (args) => args.v },
+  join: { description: "test-only: returns [args.a, args.b]", fn: (args) => [args.a, args.b] },
+};
+
+test("guard: the eval budget is armed for session_define's redefine path -- a redefine whose compute cascades into a slow upstream recompute throws a budget error (not a silent success)", async () => {
+  const table = new SessionTable({ ...DEFAULT_LIMITS, evalBudgetMs: 20 }, CASCADE_CATALOG);
+  const { sessionId } = table.open("generic");
+  // "a" busy-loops far past the 20ms budget; "b" is cheap on its own but,
+  // chained AFTER "a" inside the same redefine's arg resolution, its own
+  // compute closure's deadline check trips because "a" already blew the
+  // budget by the time "b" is reached.
+  await table.define(sessionId, { cell: "a", op: "slow", args: { ms: 150 } });
+  await table.define(sessionId, { cell: "b", op: "const_val", args: { v: 1 } });
+  await table.define(sessionId, { cell: "x", op: "const_val", args: { v: 0 } });
+  assert.deepEqual(await table.getCell(sessionId, "x"), { value: 0 }); // x now has a value -- the next define on "x" is a REDEFINE
+
+  // Redefine "x": CellGraph.defineImpl eagerly recomputes an already-valued
+  // cell synchronously, right inside graph.define() -- this is exactly the
+  // path that ran with the budget check disarmed pre-fix.
+  await table.define(sessionId, { cell: "x", op: "join", args: { a: { $cell: "a" }, b: { $cell: "b" } } });
+
+  // CellGraph's own redefine path caches a synchronous recompute failure on
+  // the cell rather than rethrowing through define() itself (see
+  // CellGraph.defineImpl's own doc), so the budget error surfaces as a
+  // structured SessionError on the next read -- a world apart from the
+  // pre-fix behavior of silently succeeding no matter how long the cascade
+  // ran (confirmed pre-fix: ~161ms elapsed, zero error, against this same
+  // 20ms budget).
+  await assert.rejects(table.getCell(sessionId, "x"), /eval budget/);
+});
+
+// ---- cell-count guard covers phantom cells from $cell refs too (audit finding #2) ----
+
+test("guard: the cell limit also covers phantom cells auto-created by unresolved $cell refs -- a redefine referencing many nonexistent cells is rejected and rolled back, not left half-applied", async () => {
+  const table = new SessionTable({ ...DEFAULT_LIMITS, maxCells: 5 }, TEST_CATALOG);
+  const { sessionId } = table.open("generic");
+  await table.setCell(sessionId, "v", 1);
+  await table.define(sessionId, { cell: "x", op: "plain_add_one", args: { value: { $cell: "v" } } });
+  assert.deepEqual(await table.getCell(sessionId, "x"), { value: 2 }); // x now has a value -- the next define on "x" is a REDEFINE
+  assert.equal((await table.listCells(sessionId)).length, 2); // v, x
+
+  // Redefine "x" referencing 20 cells that were never set/defined -- each
+  // $cell ref auto-creates an empty ("phantom") record via CellGraph's own
+  // get()/ensure(), none of which `assertCellBudget`'s pre-check (which only
+  // ever sees the ONE cell name, "x", going in) can see coming.
+  const args: Record<string, unknown> = { value: { $cell: "v" } };
+  for (let i = 0; i < 20; i++) args[`ghost${i}`] = { $cell: `ghost${i}` };
+  await assert.rejects(table.define(sessionId, { cell: "x", op: "plain_add_one", args }), /cell limit reached/);
+
+  // No phantom cells left behind: the graph is exactly what it was before
+  // the rejected redefine, not inflated by the 20 unresolved refs.
+  assert.equal((await table.listCells(sessionId)).length, 2);
+
+  // The session isn't permanently locked out of further legitimate mutation.
+  await table.setCell(sessionId, "w", 3);
+  assert.deepEqual(await table.getCell(sessionId, "w"), { value: 3 });
+});
