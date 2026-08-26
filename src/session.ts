@@ -134,7 +134,12 @@ export class SessionTable {
     if (seed) {
       for (const [cell, value] of Object.entries(seed)) this.applySet(session, cell, value);
     }
-    for (const spec of preset.defines) this.applyDefine(session, spec);
+    // Each preset define gets its own eval-budget window (§9) -- `applyDefine`
+    // can trigger a synchronous recompute right here (CellGraph.defineImpl
+    // eagerly recomputes a cell that already has a value; see `withDeadline`'s
+    // own doc for why this arming has to happen at every call site that can
+    // run a compute synchronously, not just getCell/explainCell).
+    for (const spec of preset.defines) this.withDeadline(() => this.applyDefine(session, spec));
     this.sessions.set(session.id, session);
     return { sessionId: session.id };
   }
@@ -219,7 +224,9 @@ export class SessionTable {
       capabilities: new Set(capabilities ?? []),
     };
     for (const [cell, value] of Object.entries(snapshot.free)) this.applySet(session, cell, value);
-    for (const spec of snapshot.defines) this.applyDefine(session, spec);
+    // Same reasoning as `open()`'s own preset-defines loop: arm the eval
+    // budget around every call that can trigger a synchronous recompute.
+    for (const spec of snapshot.defines) this.withDeadline(() => this.applyDefine(session, spec));
     this.sessions.set(session.id, session);
     return { sessionId: session.id };
   }
@@ -229,6 +236,36 @@ export class SessionTable {
     if (existing.length >= this.limits.maxCells && !existing.some((c) => c.id === cell)) {
       throw new SessionError(`cell limit reached (${this.limits.maxCells}) -- raise MATH_GRAPHER_MAX_CELLS if this is intentional`);
     }
+  }
+
+  /**
+   * Runs `fn` (an operation that may synchronously trigger a compute) and
+   * enforces `maxCells` against the graph's REAL total afterward -- not just
+   * against the one cell name the caller directly set/defined, which is all
+   * `assertCellBudget`'s pre-check can see. A compute that resolves `{$cell}`
+   * references reads them via `graph.get`, whose `ensure()` auto-creates an
+   * empty ("phantom") record for any name that was never itself set/defined
+   * -- so a single define with many refs to nonexistent cells can inflate the
+   * graph well past the pre-check's one-cell view. Any cell that's new since
+   * `before` gets rolled back via `graph.delete()` when the post-check trips,
+   * so a rejected operation never leaves phantom cells behind to lock the
+   * session out of further legitimate mutation (the rejected define/get
+   * itself is also never recorded -- callers throw before touching
+   * `session.defines`).
+   */
+  private withCellBudget<T>(session: Session, fn: () => T): T {
+    const before = new Set(session.graph.list().map((c) => c.id));
+    const result = fn();
+    const after = session.graph.list();
+    if (after.length > this.limits.maxCells) {
+      for (const c of after) {
+        if (!before.has(c.id)) session.graph.delete(c.id);
+      }
+      throw new SessionError(
+        `cell limit reached (${this.limits.maxCells}) -- this operation touched too many new cells in one call (e.g. $cell references to names that don't exist yet); raise MATH_GRAPHER_MAX_CELLS if this is intentional`,
+      );
+    }
+    return result;
   }
 
   private applySet(session: Session, cell: string, value: unknown): void {
@@ -270,16 +307,24 @@ export class SessionTable {
     this.assertCellBudget(session, spec.cell);
     const graph = session.graph;
     const table = this;
-    graph.define(spec.cell, () => {
-      if (table.deadline !== null && Date.now() > table.deadline) {
-        throw new SessionError(`recompute exceeded the ${table.limits.evalBudgetMs}ms eval budget (MATH_GRAPHER_EVAL_BUDGET_MS)`);
-      }
-      const resolved: Record<string, unknown> = {};
-      for (const [name, arg] of Object.entries(spec.args)) {
-        resolved[name] = resolveArg(graph, arg);
-      }
-      return catalogEntry.fn(resolved);
-    });
+    // `graph.define` can run the compute synchronously right here (a
+    // redefine of a cell that already has a value -- see CellGraph.defineImpl),
+    // which is why every caller of `applyDefine` arms `withDeadline` first.
+    // `withCellBudget` catches the OTHER half of that same synchronous
+    // compute: any `{$cell}` refs it resolves to names the session never
+    // set/defined.
+    this.withCellBudget(session, () =>
+      graph.define(spec.cell, () => {
+        if (table.deadline !== null && Date.now() > table.deadline) {
+          throw new SessionError(`recompute exceeded the ${table.limits.evalBudgetMs}ms eval budget (MATH_GRAPHER_EVAL_BUDGET_MS)`);
+        }
+        const resolved: Record<string, unknown> = {};
+        for (const [name, arg] of Object.entries(spec.args)) {
+          resolved[name] = resolveArg(graph, arg);
+        }
+        return catalogEntry.fn(resolved);
+      }),
+    );
     session.defines.set(spec.cell, spec);
   }
 
@@ -308,38 +353,42 @@ export class SessionTable {
   async getCell(sessionId: string, cell: string): Promise<{ value: unknown }> {
     const session = this.lookup(sessionId);
     return this.enqueue(session, () =>
-      this.withDeadline(() => {
-        // Computed cells are lazy -- hasValue stays false until the first
-        // get actually runs the compute -- so "exists" means either a set
-        // value or a registered define, not hasValue alone.
-        if (!session.graph.hasValue(cell) && !session.defines.has(cell)) {
-          throw new SessionError(`cell "${cell}" has no value in this session -- session_list_cells shows what exists`);
-        }
-        return { value: projectValue(session.graph.get(cell)) };
-      }),
+      this.withDeadline(() =>
+        this.withCellBudget(session, () => {
+          // Computed cells are lazy -- hasValue stays false until the first
+          // get actually runs the compute -- so "exists" means either a set
+          // value or a registered define, not hasValue alone.
+          if (!session.graph.hasValue(cell) && !session.defines.has(cell)) {
+            throw new SessionError(`cell "${cell}" has no value in this session -- session_list_cells shows what exists`);
+          }
+          return { value: projectValue(session.graph.get(cell)) };
+        }),
+      ),
     );
   }
 
   async explainCell(sessionId: string, cell: string): Promise<CellExplanation> {
     const session = this.lookup(sessionId);
     return this.enqueue(session, () =>
-      this.withDeadline(() => {
-        if (!session.graph.hasValue(cell) && !session.defines.has(cell)) {
-          throw new SessionError(`cell "${cell}" has no value in this session -- session_list_cells shows what exists`);
-        }
-        const value = projectValue(session.graph.get(cell));
-        const spec = session.defines.get(cell);
-        if (!spec) return { cell, role: "free" as const, dependencies: [], value };
-        const dependencies = extractCellRefs(spec.args).map((dep) => ({
-          cell: dep,
-          // A referenced cell that was never itself set/defined still
-          // resolves (CellGraph auto-creates an empty record on read --
-          // see listCells's own comment on the same behavior), so this
-          // reports `undefined` for it rather than throwing mid-explanation.
-          value: session.graph.hasValue(dep) ? projectValue(session.graph.get(dep)) : undefined,
-        }));
-        return { cell, role: "computed" as const, op: spec.op, args: spec.args, dependencies, value };
-      }),
+      this.withDeadline(() =>
+        this.withCellBudget(session, () => {
+          if (!session.graph.hasValue(cell) && !session.defines.has(cell)) {
+            throw new SessionError(`cell "${cell}" has no value in this session -- session_list_cells shows what exists`);
+          }
+          const value = projectValue(session.graph.get(cell));
+          const spec = session.defines.get(cell);
+          if (!spec) return { cell, role: "free" as const, dependencies: [], value };
+          const dependencies = extractCellRefs(spec.args).map((dep) => ({
+            cell: dep,
+            // A referenced cell that was never itself set/defined still
+            // resolves (CellGraph auto-creates an empty record on read --
+            // see listCells's own comment on the same behavior), so this
+            // reports `undefined` for it rather than throwing mid-explanation.
+            value: session.graph.hasValue(dep) ? projectValue(session.graph.get(dep)) : undefined,
+          }));
+          return { cell, role: "computed" as const, op: spec.op, args: spec.args, dependencies, value };
+        }),
+      ),
     );
   }
 
@@ -361,10 +410,16 @@ export class SessionTable {
 
   async define(sessionId: string, spec: DefineSpec): Promise<{ ok: true }> {
     const session = this.lookup(sessionId);
-    return this.enqueue(session, () => {
-      this.applyDefine(session, spec);
-      return { ok: true as const };
-    });
+    return this.enqueue(session, () =>
+      // Arms the eval budget (§9) around `applyDefine` -- redefining a cell
+      // that already has a value triggers a synchronous recompute right
+      // inside `graph.define()` (see `withDeadline`'s own doc), same as
+      // `getCell`/`explainCell` already do for their own synchronous computes.
+      this.withDeadline(() => {
+        this.applyDefine(session, spec);
+        return { ok: true as const };
+      }),
+    );
   }
 }
 

@@ -28,7 +28,23 @@ interface ToolResult {
 }
 
 function ok(payload: unknown): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+  return { content: [{ type: "text", text: JSON.stringify(payload, nonFiniteReplacer, 2) }] };
+}
+
+/**
+ * Plain `JSON.stringify` silently turns `Infinity`/`-Infinity`/`NaN` into
+ * `null` -- indistinguishable from a genuinely null result (e.g. `math_eval`
+ * on `"1/0"`, or a graph-analysis distance to an unreachable vertex). Encode
+ * them as clearly-marked strings instead, so a caller can tell "the op
+ * computed positive infinity" apart from "the value is null". Applies to
+ * every tool's payload (not just math_eval's) since any op's result can flow
+ * through `ok()`.
+ */
+function nonFiniteReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    return Number.isNaN(value) ? "NaN" : value > 0 ? "Infinity" : "-Infinity";
+  }
+  return value;
 }
 
 function err(e: unknown): ToolResult {
