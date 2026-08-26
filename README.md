@@ -1,5 +1,7 @@
 # math-grapher
 
+Full documentation: [opensource.johnhenry.me/math/math-grapher](https://opensource.johnhenry.me/math/math-grapher/)
+
 A headless, DOM-less session runtime for the `@johnhenry/math` family's reactive
 compute graph (`CellGraph`), agent-drivable over MCP.
 
