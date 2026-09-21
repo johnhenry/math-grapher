@@ -1,9 +1,53 @@
 # math-grapher
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-grapher.svg)](https://www.npmjs.com/package/@johnhenry/math-grapher)
+[![CI](https://github.com/johnhenry/math-grapher/actions/workflows/ci.yml/badge.svg)](https://github.com/johnhenry/math-grapher/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-grapher.svg)](LICENSE)
+
 Full documentation: [opensource.johnhenry.me/math/math-grapher](https://opensource.johnhenry.me/math/math-grapher/)
 
 A headless, DOM-less session runtime for the `@johnhenry/math` family's reactive
 compute graph (`CellGraph`), agent-drivable over MCP.
+
+## Usage
+
+```bash
+# stdio (the transport MCP hosts speak natively -- e.g. `claude mcp add`)
+npx @johnhenry/math-grapher
+
+# Streamable HTTP on http://localhost:3920/mcp (or a custom port)
+npx @johnhenry/math-grapher --http
+npx @johnhenry/math-grapher --http 8123
+```
+
+Tools: `session_open` (kind `generic` or `graph-theory`), `session_close`,
+`session_list`, `session_set_cell`, `session_get_cell`,
+`session_list_cells`, `session_explain_cell` (a cell's own op/args/
+immediate dependencies with their current values, one level -- issue #5),
+`session_snapshot`/`session_resume` (serialize a session's free-cell
+values + define-specs; reconstruct an equivalent session, possibly on a
+different process -- issue #6), `session_define`. Computed cells are
+declared as
+JSON define-specs over a server-side op catalog (`math_eval`,
+`graph_parse_edge_list`, `graph_analyze`, `graph_bfs`/`dfs`/`dijkstra`)
+with `{"$cell": "name"}` live references — see
+[docs/design.md §5](docs/design.md). An op MAY declare a
+`requiresCapability` (issue #7); `session_define` rejects it unless
+`session_open`/`session_resume`'s own optional `capabilities` arg granted
+it for that session (default none — matching the existing write-path
+gating precedent below, just per-op instead of one global switch). No op
+in the catalog above declares one yet.
+
+Resource guards default modest and are overridable:
+`MATH_GRAPHER_MAX_SESSIONS` (16), `MATH_GRAPHER_MAX_CELLS` (512),
+`MATH_GRAPHER_EVAL_BUDGET_MS` (250), `MATH_GRAPHER_MAX_PAYLOAD_BYTES`
+(262144).
+
+## Status
+
+**v1 implemented.** [docs/design.md](docs/design.md) is the settled
+design; the session runtime, op catalog, MCP tool surface, and both
+transports are built and tested.
 
 ## Why this exists
 
@@ -65,43 +109,3 @@ It deliberately does NOT own:
   env var (`MALLORY_GRAPH_ENABLE_MCP_WRITE=1`), mirroring `llmtm`'s
   `LLMTM_HUB_ENABLE_*` convention. A session-runtime write surface should
   follow the same default-off, explicit-opt-in posture.
-
-## Status
-
-**v1 implemented.** [docs/design.md](docs/design.md) is the settled
-design; the session runtime, op catalog, MCP tool surface, and both
-transports are built and tested.
-
-## Usage
-
-```bash
-# stdio (the transport MCP hosts speak natively -- e.g. `claude mcp add`)
-npx @johnhenry/math-grapher
-
-# Streamable HTTP on http://localhost:3920/mcp (or a custom port)
-npx @johnhenry/math-grapher --http
-npx @johnhenry/math-grapher --http 8123
-```
-
-Tools: `session_open` (kind `generic` or `graph-theory`), `session_close`,
-`session_list`, `session_set_cell`, `session_get_cell`,
-`session_list_cells`, `session_explain_cell` (a cell's own op/args/
-immediate dependencies with their current values, one level -- issue #5),
-`session_snapshot`/`session_resume` (serialize a session's free-cell
-values + define-specs; reconstruct an equivalent session, possibly on a
-different process -- issue #6), `session_define`. Computed cells are
-declared as
-JSON define-specs over a server-side op catalog (`math_eval`,
-`graph_parse_edge_list`, `graph_analyze`, `graph_bfs`/`dfs`/`dijkstra`)
-with `{"$cell": "name"}` live references — see
-[docs/design.md §5](docs/design.md). An op MAY declare a
-`requiresCapability` (issue #7); `session_define` rejects it unless
-`session_open`/`session_resume`'s own optional `capabilities` arg granted
-it for that session (default none — matching the existing write-path
-gating precedent below, just per-op instead of one global switch). No op
-in the catalog above declares one yet.
-
-Resource guards default modest and are overridable:
-`MATH_GRAPHER_MAX_SESSIONS` (16), `MATH_GRAPHER_MAX_CELLS` (512),
-`MATH_GRAPHER_EVAL_BUDGET_MS` (250), `MATH_GRAPHER_MAX_PAYLOAD_BYTES`
-(262144).

@@ -33,7 +33,7 @@
     "type": "git",
     "url": "git+https://github.com/johnhenry/math-grapher.git"
   },
-  "homepage": "https://github.com/johnhenry/math-grapher#readme",
+  "homepage": "https://opensource.johnhenry.me/math/math-grapher/",
   "bugs": {
     "url": "https://github.com/johnhenry/math-grapher/issues"
   },
@@ -44,6 +44,6 @@
   "license": "MIT",
   "sideEffects": false,
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=26.0.0"
   }
 }
