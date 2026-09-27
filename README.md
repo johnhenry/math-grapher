@@ -43,6 +43,19 @@ Resource guards default modest and are overridable:
 `MATH_GRAPHER_EVAL_BUDGET_MS` (250), `MATH_GRAPHER_MAX_PAYLOAD_BYTES`
 (262144).
 
+## Platform
+
+The `.` entry (`SessionTable`, `buildServer`, `CellGraph`, the op catalog)
+is Node- and browser-safe — no `node:*` import in its graph, verified by
+bundling it with esbuild under `platform: 'browser'` (see
+`test/browser-bundle.test.ts`). `randomUUID` uses `globalThis.crypto`
+(Node ≥19, every modern browser) rather than `node:crypto`. The `bin`
+(`npx @johnhenry/math-grapher`, `src/cli.ts`) is Node-only — it owns the
+`--http` transport (`node:http`) — and is never imported by `.`; embedding
+this runtime in a browser page or bundler build means importing `.`
+directly (e.g. via an in-page MCP `Client`/`InMemoryTransport` pair, ORRERY's
+own pattern), not the CLI.
+
 ## Status
 
 **v1 implemented.** [docs/design.md](docs/design.md) is the settled

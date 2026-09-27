@@ -7,7 +7,6 @@
  * that with zero new machinery inside the graph itself. Distinct sessions
  * are fully independent.
  */
-import { randomUUID } from "node:crypto";
 import { CellGraph } from "@johnhenry/math";
 import { DEFAULT_LIMITS, type SessionLimits } from "./limits.ts";
 import { extractCellRefs, isCellRef, OP_CATALOG, projectValue, type DefineSpec, type OpCatalog } from "./ops.ts";
@@ -117,7 +116,7 @@ export class SessionTable {
     const preset = PRESETS[kind];
     if (!preset) throw new SessionError(`unknown session kind "${kind}" -- expected one of: ${Object.keys(PRESETS).join(", ")}`);
     const session: Session = {
-      id: randomUUID(),
+      id: globalThis.crypto.randomUUID(),
       kind,
       graph: new CellGraph(),
       defines: new Map(),
@@ -215,7 +214,7 @@ export class SessionTable {
     }
     if (!PRESETS[snapshot.kind]) throw new SessionError(`unknown session kind "${snapshot.kind}" -- expected one of: ${Object.keys(PRESETS).join(", ")}`);
     const session: Session = {
-      id: randomUUID(),
+      id: globalThis.crypto.randomUUID(),
       kind: snapshot.kind,
       graph: new CellGraph(),
       defines: new Map(),
