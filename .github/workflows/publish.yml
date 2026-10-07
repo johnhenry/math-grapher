@@ -22,7 +22,7 @@ permissions:
   id-token: write # npm provenance attestation
 
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
