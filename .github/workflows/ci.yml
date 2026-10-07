@@ -36,3 +36,6 @@ jobs:
       - run: npm test
 
       - run: npm run build
+
+  workflow-lint:
+    uses: johnhenry/workflows/.github/workflows/workflow-lint.yml@v1
