@@ -18,8 +18,8 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
-  id-token: write # npm provenance attestation
+  contents: write # tag + GitHub Release by-product
+  id-token: write # npm provenance
 
 concurrency:
   group: publish-${{ github.ref }}
@@ -52,10 +52,25 @@ jobs:
         run: |
           echo "::notice title=Publish skipped::NPM_TOKEN is not configured; nothing was published."
 
+      - name: Check whether this version is new on npm
+        id: release-probe
+        # Feeds the tag + GitHub Release step below: only a run that actually
+        # publishes a new version should create the release.
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Idempotent: `npm view` returns non-zero for a version that does not
       # exist yet, which is the signal to publish. Any other failure still
       # fails the job.
       - name: Publish if this version is new
+        id: publish
         if: env.NPM_TOKEN != ''
         run: |
           NAME=$(node -p "require('./package.json').name")
@@ -74,3 +89,9 @@ jobs:
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag and GitHub Release (by-product)
+        if: steps.release-probe.outputs.new == 'true' && steps.publish.outcome == 'success'
+        uses: johnhenry/workflows/.github/actions/create-release@v1
+        with:
+          version: ${{ steps.release-probe.outputs.version }}
